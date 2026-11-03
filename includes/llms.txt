@@ -1,6 +1,6 @@
 Plano Docs v0.4.39
 llms.txt (auto-generated)
-Generated (UTC): 2026-11-03T22:54:49.160687+00:00
+Generated (UTC): 2026-11-03T22:56:19.329109+00:00
 
 Table of contents
 - Agents (concepts/agents)
@@ -5745,6 +5745,14 @@ listeners:
     name: travel_booking_service
     port: 8001
     router: plano_orchestrator_v1
+    # Run every selected agent concurrently and merge their answers into one
+    # reply. Without this block the agents run in sequence and only the last
+    # one's answer reaches the client.
+    orchestration:
+      execution: parallel
+      strategy: concat
+      branch_timeout: 30s
+      on_branch_error: continue
     agents:
       - id: weather_agent
         description: |
@@ -5760,7 +5768,6 @@ listeners:
             * Provides detailed weather information
             * Understands conversation context to resolve location references from previous messages
             * Handles weather-related questions including "What's the weather in [city]?", "What's the forecast for [city]?", "How's the weather in [city]?"
-            * When queries include both weather and other travel questions (e.g., flights, currency), this agent answers ONLY the weather part
 
       - id: flight_agent
         description: |
@@ -5778,7 +5785,6 @@ listeners:
             * Automatically resolves city names to airport codes (IATA/ICAO)
             * Understands conversation context to infer origin/destination from follow-up questions
             * Handles flight-related questions including "What flights go from [city] to [city]?", "Do flights go to [city]?", "Are there direct flights from [city]?"
-            * When queries include both flight and other travel questions (e.g., weather, currency), this agent answers ONLY the flight part
 
 tracing:
   random_sampling: 100
@@ -5792,7 +5798,57 @@ agents list: Define each agent with an id, description (used for routing decisio
 
 router: The plano_orchestrator_v1 router uses Plano-Orchestrator to analyze user intent and select the appropriate agent.
 
+orchestration: Controls how the selected agents run and how their answers combine. See Composing Multiple Agents below.
+
 filter_chain: Optionally attach filter chains to agents for guardrails, query rewriting, or context enrichment.
+
+
+
+Composing Multiple Agents
+
+A single prompt often has more than one intent — “What’s the weather in Paris, and what’s the euro exchange rate?” Plano-Orchestrator selects every agent that can help, but by default those agents run one after another and only the last one’s answer is returned.
+
+The optional orchestration block changes that. It runs the selected agents concurrently and merges their answers into a single reply:
+
+listeners:
+  - type: agent
+    name: travel_booking_service
+    port: 8001
+    router: plano_orchestrator_v1
+    orchestration:
+      execution: parallel      # sequential (default) | parallel
+      strategy: concat         # concat | synthesize (default)
+      # aggregator required only for synthesize:
+      # aggregator: openai/gpt-4o
+      branch_timeout: 30s      # optional, default 60s
+      on_branch_error: continue  # continue (default) | fail
+    agents:
+      - id: weather_agent
+        description: ...
+
+Fields
+
+execution — sequential (the default) runs agents in a chain, each seeing the previous answers. parallel runs them concurrently, each seeing only the user’s conversation.
+
+strategy — synthesize (the default) calls an LLM to rewrite replies into one prose answer. concat joins labeled answers with no extra model call — prefer this for complementary specialists (weather + flights) where a second LLM is pure latency tax.
+
+aggregator — required when strategy is synthesize. A model_providers name, or an agents id for custom merge logic (must not also be one of the agents being merged). Unused for concat.
+
+branch_timeout — budget for the whole fan-out, as 500ms, 30s, or 2m. Agents still running when it expires are cancelled and reported as unavailable.
+
+on_branch_error — continue merges whatever succeeded, fail fails the turn if any agent fails.
+
+Behavior notes
+
+Omitting the block changes nothing: agents chain sequentially and the last answer is returned, exactly as before.
+
+A turn that selects only one agent skips the merge entirely and streams that agent’s response directly.
+
+Each parallel agent receives only the user’s conversation, never a sibling’s answer. Agents therefore do not need description text telling them to answer “only their part.”
+
+The aggregator is told which agents failed, so a partial answer says what is missing rather than appearing complete.
+
+Because the merged answer is assembled before it is sent, clients requesting stream: true receive it as a single streamed chunk rather than token by token.
 
 Writing Effective Agent Descriptions
 
@@ -7358,6 +7414,13 @@ listeners:
     port: 8001
     router: plano_orchestrator_v1
     address: 0.0.0.0
+    # Optional. How the selected agents run and how their answers combine.
+    # Omit for the default: sequential chaining, last agent's answer returned.
+    orchestration:
+      execution: parallel # sequential (default) | parallel
+      strategy: concat # concat | synthesize (default); aggregator required for synthesize
+      branch_timeout: 30s # optional, default 60s
+      on_branch_error: continue # continue (default) | fail
     agents:
       - id: rag_agent
         description: virtual assistant for retrieval augmented generation tasks
